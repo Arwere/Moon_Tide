@@ -1,90 +1,121 @@
 import asyncio
+import json
 import time
-import numpy as np
-from typing import List
+from typing import Dict, Optional, List, Any
 import httpx
-from config import config
+import logging
+import os
 
-client = httpx.AsyncClient(timeout=15.0)
-BIRDEYE_API_KEY = "fc1e63ea2f2548ebb120f97580d51923"
+logger = logging.getLogger(__name__)
 
-price_cache = {}
-history_cache = {}
-last_price_fetch = {}
-last_history_fetch = {}
+class HybridDataFetcher:
+    def __init__(self, birdeye_api_key: Optional[str] = None, rpc_url: str = "https://api.mainnet-beta.solana.com"):
+        self.birdeye_key = birdeye_api_key or os.getenv("BIRDEYE_API_KEY")
+        self.rpc_url = rpc_url
+        self.client = httpx.AsyncClient(timeout=12.0, limits=httpx.Limits(max_connections=30, max_keepalive_connections=10))
+        self.cache = {}
+        self.cache_ttl = 25  # seconds
 
-async def get_price_in_sol(token_address: str) -> float:
-    now = time.time()
-    if token_address in price_cache and now - last_price_fetch.get(token_address, 0) < 8:
-        return price_cache[token_address]
+    async def close(self):
+        await self.client.aclose()
 
-    try:
-        url = f"https://public-api.birdeye.so/defi/price?address={token_address}"
-        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
-        resp = await client.get(url, headers=headers)
-        data = resp.json()
-        price = float(data.get("data", {}).get("value", 0.0))
-        
-        if price > 0:
-            price_cache[token_address] = price
-            last_price_fetch[token_address] = now
-            return price
-    except:
-        pass
+    async def get_price(self, token_mint: str, vs_token: str = "USDC") -> Optional[float]:
+        """Priority: Jupiter V3 → DexScreener → Birdeye (if key)"""
+        if not token_mint:
+            return None
 
-    # Smart fallback price
-    base_prices = {
-        "Ax8PSfCXxmxb8C8kYTzN5CPpTe6PyeZfFf8rrXNCjupx": 0.00105,   # MM
-        "a3W4qutoEJA4232T2gwZUfgYJTetr96pU4SJMwppump": 0.0065,    # WHITEWHALE
-        "5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2": 0.125      # TROLL
-    }
-    return base_prices.get(token_address, 0.01)
+        cache_key = f"price_{token_mint}"
+        now = time.time()
+        if cache_key in self.cache and now - self.cache[cache_key]['ts'] < self.cache_ttl:
+            return self.cache[cache_key]['price']
 
+        # 1. Jupiter V3 (best executable price)
+        try:
+            url = f"https://api.jup.ag/price/v3?ids={token_mint}"
+            resp = await self.client.get(url)
+            data = resp.json()
+            if data.get('data', {}).get(token_mint):
+                price = float(data['data'][token_mint].get('price') or data['data'][token_mint].get('usdPrice', 0))
+                if price > 0:
+                    self.cache[cache_key] = {'price': price, 'ts': now}
+                    return price
+        except Exception as e:
+            logger.debug(f"Jupiter V3 failed for {token_mint}: {e}")
 
-async def get_historical_prices(token_address: str, limit: int = 500) -> List[float]:
-    now = time.time()
-    cache_key = f"{token_address}_{limit}"
-    
-    if cache_key in history_cache and now - last_history_fetch.get(cache_key, 0) < 35:
-        return history_cache[cache_key]
+        # 2. DexScreener fallback
+        try:
+            url = f"https://api.dexscreener.com/tokens/v1/solana/{token_mint}"
+            resp = await self.client.get(url)
+            data = resp.json()
+            if isinstance(data, list) and data:
+                # Take best pair by liquidity
+                best = max(data, key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0))
+                price = float(best.get('priceUsd') or best.get('priceNative', 0))
+                if price > 0:
+                    self.cache[cache_key] = {'price': price, 'ts': now}
+                    return price
+        except Exception as e:
+            logger.debug(f"DexScreener failed: {e}")
 
-    try:
-        url = f"https://public-api.birdeye.so/defi/history_price"
-        params = {"address": token_address, "address_type": "token", "type": "15m", "limit": limit}
-        headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
-        resp = await client.get(url, params=params, headers=headers)
-        data = resp.json()
+        # 3. Birdeye (only if key present)
+        if self.birdeye_key:
+            try:
+                url = f"https://public-api.birdeye.so/defi/price?address={token_mint}"
+                headers = {"X-API-KEY": self.birdeye_key, "x-chain": "solana"}
+                resp = await self.client.get(url, headers=headers)
+                data = resp.json()
+                if data.get('success') and data.get('data'):
+                    price = float(data['data'].get('value', 0))
+                    if price > 0:
+                        self.cache[cache_key] = {'price': price, 'ts': now}
+                        return price
+            except Exception as e:
+                logger.debug(f"Birdeye price failed: {e}")
 
-        if data.get("success") and "data" in data and "items" in data["data"]:
-            prices = [float(item["value"]) for item in data["data"]["items"] if item.get("value")]
-            if len(prices) > 150:
-                prices = prices[::-1]
-                history_cache[cache_key] = prices
-                last_history_fetch[cache_key] = now
-                print(f"✅ Loaded {len(prices)} real candles for {token_address[:8]}...")
-                return prices
-    except Exception as e:
-        print(f"Birdeye error for {token_address[:8]}: {e}")
+        logger.warning(f"All sources failed to get price for {token_mint}")
+        return None
 
-    # === IMPROVED REALISTIC FALLBACK ===
-    print(f"⚠️ Using realistic fallback data for {token_address[:8]}...")
-    
-    base_price = {
-        "Ax8PSfCXxmxb8C8kYTzN5CPpTe6PyeZfFf8rrXNCjupx": 0.00105,
-        "a3W4qutoEJA4232T2gwZUfgYJTetr96pU4SJMwppump": 0.0065,
-        "5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2": 0.125
-    }.get(token_address, 0.01)
+    async def get_token_info(self, token_mint: str) -> Dict:
+        """Rich info combining all sources"""
+        info = {
+            "mint": token_mint,
+            "price": None,
+            "liquidity_usd": 0,
+            "volume_24h": 0,
+            "mc": 0,
+            "dex": None
+        }
 
-    # Generate realistic price series with volatility + small trends
-    np.random.seed(int(time.time()) % 10000)  # Slight randomness per run
-    prices = [base_price]
-    volatility = 0.018 if "TROLL" in token_address else 0.022
-    
-    for _ in range(limit - 1):
-        change = np.random.normal(0, volatility)
-        new_price = prices[-1] * (1 + change)
-        prices.append(max(new_price, base_price * 0.4))
-    
-    history_cache[cache_key] = prices
-    last_history_fetch[cache_key] = now
-    return prices
+        # DexScreener (great for pair data)
+        try:
+            url = f"https://api.dexscreener.com/tokens/v1/solana/{token_mint}"
+            resp = await self.client.get(url)
+            data = resp.json()
+            if isinstance(data, list) and data:
+                best = max(data, key=lambda x: float(x.get('liquidity', {}).get('usd', 0) or 0))
+                info['price'] = float(best.get('priceUsd') or 0)
+                info['liquidity_usd'] = float(best.get('liquidity', {}).get('usd', 0))
+                info['volume_24h'] = float(best.get('volume', {}).get('h24', 0))
+                info['dex'] = best.get('dexId')
+        except:
+            pass
+
+        # Birdeye enrichment
+        if self.birdeye_key:
+            try:
+                url = f"https://public-api.birdeye.so/defi/token_overview?address={token_mint}"
+                headers = {"X-API-KEY": self.birdeye_key, "x-chain": "solana"}
+                resp = await self.client.get(url, headers=headers)
+                data = resp.json()
+                if data.get('success') and data.get('data'):
+                    d = data['data']
+                    info['price'] = info['price'] or float(d.get('price', 0))
+                    info['liquidity_usd'] = max(info['liquidity_usd'], float(d.get('liquidity', 0)))
+                    info['volume_24h'] = max(info['volume_24h'], float(d.get('v24hUSD', 0)))
+                    info['mc'] = float(d.get('mc', 0))
+            except:
+                pass
+
+        return info
+
+    # Add more methods later (OHLCV, wallet via RPC, etc.)
