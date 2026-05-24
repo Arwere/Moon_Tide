@@ -7,11 +7,12 @@ from config import config
 from portfolio import Portfolio
 from jupiter_client import JupiterClient
 
+
 class LiquidityKraken:
     def __init__(self, token_key: str, portfolio: Portfolio, 
                  jupiter: JupiterClient, dry_run: bool = True):
         self.token_key = token_key
-        self.config = config.TOKENS[token_key]
+        self.config = config.TOKENS[token_key]          # ← Single source
         self.agent = Poseidon()
         self.portfolio = portfolio
         self.jupiter = jupiter
@@ -22,7 +23,7 @@ class LiquidityKraken:
     async def tick(self):
         try:
             current_price = await get_price_in_sol(self.config.address)
-            if current_price <= 0:
+            if current_price is None or current_price <= 0:
                 return
 
             self.last_price = current_price
