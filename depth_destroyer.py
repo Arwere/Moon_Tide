@@ -54,33 +54,32 @@ class DepthDestroyer:
             if time.time() < self.cooldown_until:
                 return
 
-            # === STRONG EXIT LOGIC ===
+            # Exit first (strong risk control)
             exit_signal = self.portfolio.should_exit(self.token_key, current_price)
             if exit_signal["action"] == "SELL":
-                percent = exit_signal.get("percent", 1.0)
-                reason = exit_signal["reason"]
-                print(f"🛑 DEPTH DESTROYER EXIT → {self.config.symbol} | {reason}")
-                await self._execute_exit(percent, current_price, reason)
-                self.cooldown_until = time.time() + 180   # Fast recovery for sniper bot
+                await self._execute_exit(exit_signal.get("percent", 1.0), current_price, exit_signal["reason"])
+                self.cooldown_until = time.time() + 180
                 return
 
-            # === ENTRY LOGIC ===
+            # Smart Entry with Risk-Based Sizing
             if (action in ["BUY", "STRONG_BUY"] and score >= self.specialization["min_score"] and
                 not self.portfolio.get_position(self.token_key)):
                 
-                suggested_sol = min(decision.get("suggested_capital_percent", 0.20) * 10.0, 3.5)
-                if suggested_sol < 0.05:
+                suggested_percent = decision.get("suggested_capital_percent", 0.20)
+                sol_amount = self.portfolio.calculate_position_size(self.config, current_price, suggested_percent)
+
+                if sol_amount < 0.05:
                     return
 
-                token_amount = suggested_sol / current_price
-                if self.portfolio.open_position(self.token_key, self.config.symbol, current_price, suggested_sol, token_amount):
+                token_amount = sol_amount / current_price
+                if self.portfolio.open_position(self.token_key, self.config.symbol, current_price, sol_amount, token_amount):
                     await notifier.send_trade_alert(
-                        "DepthDestroyer", "BUY", self.config.symbol, score, suggested_sol, current_price, 
+                        "DepthDestroyer", "BUY", self.config.symbol, score, sol_amount, current_price, 
                         decision.get("reason", "")
                     )
                     await self.jupiter.execute_swap(
                         "So11111111111111111111111111111111111111112", 
-                        self.config.address, suggested_sol, dry_run=self.dry_run
+                        self.config.address, sol_amount, dry_run=self.dry_run
                     )
                     self.cooldown_until = time.time() + 600
 
@@ -100,9 +99,4 @@ class DepthDestroyer:
         if not pos: return
         self.portfolio.close_partial(self.token_key, percent, current_price, reason)
         sell_sol_approx = (pos.amount * percent) * current_price
-        await self.jupiter.execute_swap(
-            self.config.address, 
-            "So11111111111111111111111111111111111111112", 
-            sell_sol_approx, 
-            dry_run=self.dry_run
-        )
+        await self.jupiter.execute_swap(self.config.address, "So11111111111111111111111111111111111111112", sell_sol_approx, dry_run=self.dry_run)
