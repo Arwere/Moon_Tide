@@ -28,7 +28,7 @@ class ClaudeBrain:
     def _save_memory(self):
         try:
             with open(self.memory_file, "w") as f:
-                json.dump(self.memory[-50:], f, indent=2)  # Keep last 50 entries
+                json.dump(self.memory[-60:], f, indent=2)
         except:
             pass
 
@@ -81,11 +81,11 @@ class ClaudeBrain:
                 result.get("reason", "")
             )
 
-            # Ask for code suggestion on strong trades
-            if result.get("final_score", 0) >= 7.5 and random.random() < 0.4:
+            # Strong trade → Ask for improvement suggestion
+            if result.get("final_score", 0) >= 7.5 and random.random() < 0.35:
                 suggestion = await self._ask_for_improvement(context, result)
                 if suggestion:
-                    print(f"\n🤖 CLAUDE STRATEGY SUGGESTION: {suggestion}\n")
+                    print(f"\n🤖 CLAUDE IMPROVEMENT SUGGESTION:\n{suggestion}\n")
 
             return result
 
@@ -94,23 +94,28 @@ class ClaudeBrain:
             return self._fallback_decision()
 
     def _build_rich_prompt(self, ctx: Dict) -> str:
-        memory_text = "\n".join([f"{m['time']} | {m['token']}: {m['action']} ({m['score']}) → {m['reason']}" 
-                               for m in self.memory[-12:]]) or "No previous trades."
+        memory_text = "\n".join([
+            f"{m['time']} | {m['token']}: {m['action']} ({m['score']}) → {m['reason']}" 
+            for m in self.memory[-12:]
+        ]) or "No previous trades."
 
-        return f"""You are Poseidon, a highly skilled Solana meme coin trader.
+        return f"""You are Poseidon, an elite Solana meme coin trading agent.
 
-Current Bot: {ctx.get('bot_name')}
+Bot: {ctx.get('bot_name')}
 Token: {ctx.get('symbol')} @ {ctx.get('price', 0):.8f} SOL
-Liquidity: ${ctx.get('liquidity', 0):,.0f} | 24h Volume: ${ctx.get('volume_24h', 0):,.0f}
+Liquidity: ${ctx.get('liquidity', 0):,.0f} | 24h Vol: ${ctx.get('volume_24h', 0):,.0f}
+24h Change: {ctx.get('price_change_24h', 0):+.1f}%
 
 Portfolio: {ctx.get('total_capital', 50):.2f} SOL total | {ctx.get('deployed_pct', 0):.1f}% deployed
+Open Positions: {ctx.get('open_positions_summary', 'None')}
+
+Technical Analysis:
+{ctx.get('technical_summary', 'N/A')}
 
 Recent Memory:
 {memory_text}
 
-Technical Context: {ctx.get('technical_summary', 'N/A')}
-
-Make a decisive trading call. Respond **ONLY** with this exact JSON format:
+Make a high-conviction decision. Reply with **ONLY** valid JSON:
 
 {{
   "action": "STRONG_BUY | BUY | HOLD | SELL",
@@ -118,16 +123,15 @@ Make a decisive trading call. Respond **ONLY** with this exact JSON format:
   "suggested_capital_percent": 0.18,
   "tp": 0.16,
   "sl": -0.085,
-  "reason": "Short clear reason under 110 characters"
+  "reason": "Clear short reason (max 110 chars)"
 }}
 """
 
     async def _ask_for_improvement(self, context: Dict, decision: Dict) -> str:
-        """Ask Claude for actionable code/strategy improvements"""
-        prompt = f"""You just made a strong trade (Score: {decision.get('final_score')}) on {context.get('symbol')}.
+        prompt = f"""You made a strong call (Score: {decision.get('final_score')}) on {context.get('symbol')}.
 
-Suggest **one specific, actionable** improvement to the bot's code or strategy that would help capture more trades like this.
-Be concrete and technical. Max 2 sentences."""
+Give **one concrete, actionable** suggestion to improve the bot's strategy or code to capture more similar good trades.
+Be specific and technical. Max 2 sentences."""
 
         try:
             resp = await self.client.post(
@@ -135,10 +139,9 @@ Be concrete and technical. Max 2 sentences."""
                 headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                 json={"model": self.model, "max_tokens": 300, "temperature": 0.5, "messages": [{"role": "user", "content": prompt}]}
             )
-            text = resp.json()["content"][0]["text"]
-            return text.strip()[:280]
+            return resp.json()["content"][0]["text"].strip()
         except:
-            return ""
+            return "No suggestion available."
 
     def _fallback_decision(self) -> Dict:
         return {
@@ -147,7 +150,7 @@ Be concrete and technical. Max 2 sentences."""
             "suggested_capital_percent": 0.08,
             "tp": 0.15,
             "sl": -0.09,
-            "reason": "Fallback - Claude unavailable"
+            "reason": "Claude unavailable - fallback"
         }
 
 claude = ClaudeBrain()
