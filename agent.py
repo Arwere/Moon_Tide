@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Any
 from config import config
 from strategies import TrendStrategy, MomentumStrategy, MeanReversionStrategy, VolatilityStrategy
 from risk_manager import RiskManager
@@ -13,68 +13,97 @@ class Poseidon:
             "volatility": VolatilityStrategy()
         }
         self.risk_manager = RiskManager()
-        self.use_claude = True   # Toggle this to False for pure rules
+        self.use_claude = True
 
-    async def get_risk_adjusted_decision(self, token_config, market_data: Dict, prices: List[float], bot_name: str = None) -> Dict:
+    async def get_risk_adjusted_decision(self, token_config, market_data: Dict, prices: List[float], 
+                                       bot_name: str, portfolio_summary: Dict = None, 
+                                       specialization: Dict = None) -> Dict:
+        
         if len(prices) < 80:
-            return {"action": "HOLD", "final_score": 5.0, "suggested_capital_percent": 0.0, "reason": "Not enough data"}
+            return {"action": "HOLD", "final_score": 5.0, "suggested_capital_percent": 0.0, 
+                    "reason": "Not enough price history"}
 
-        # 1. Technical Analysis Score
-        technical_score = self._calculate_multi_tf_score(prices)
+        specialization = specialization or {}
+        
+        # Calculate technical score
+        technical_score = self._calculate_multi_tf_score(prices, specialization.get("strategy_weights"))
 
-        # 2. Claude Decision Layer
+        # Build rich context for Claude
+        claude_context = {
+            "bot_name": bot_name,
+            "symbol": token_config.symbol,
+            "price": market_data.get("price_sol", 0),
+            "liquidity": market_data.get("liquidity", 0),
+            "volume_24h": market_data.get("volume_24h", 0),
+            "mc": market_data.get("mc", 0),
+            "price_change_24h": market_data.get("price_change_24h", 0),
+            "technical_summary": self._generate_technical_summary(prices),
+            "total_capital": portfolio_summary.get("total_capital", 50.0) if portfolio_summary else 50.0,
+            "deployed": portfolio_summary.get("deployed", 0.0) if portfolio_summary else 0.0,
+            "deployed_pct": portfolio_summary.get("deployed_pct", 0.0) if portfolio_summary else 0.0,
+            "open_positions_summary": portfolio_summary.get("open_positions_summary", "None") if portfolio_summary else "None",
+        }
+
         if self.use_claude:
-            context = self._build_claude_context(token_config, market_data, prices, technical_score)
-            claude_result = await claude.get_decision(context)
+            claude_result = await claude.get_decision(claude_context)
+            
+            final_score = round((technical_score * 0.48) + (claude_result.get("final_score", 5.5) * 0.52), 1)
 
-            final_score = round((technical_score * 0.55) + (claude_result.get("final_score", 5.5) * 0.45), 1)
-
-            decision = {
+            return {
                 "action": claude_result.get("action", "HOLD"),
                 "final_score": final_score,
                 "suggested_capital_percent": claude_result.get("suggested_capital_percent", 0.12),
-                "tp": claude_result.get("tp", 0.14),
-                "sl": claude_result.get("sl", -0.07),
+                "tp": claude_result.get("tp", 0.15),
+                "sl": claude_result.get("sl", -0.085),
                 "bot_name": bot_name,
                 "reason": claude_result.get("reason", "Hybrid Analysis")
             }
         else:
-            # Pure rules fallback
-            decision = {
-                "action": "BUY" if technical_score >= 6.8 else "HOLD",
+            # Pure technical fallback
+            action = "BUY" if technical_score >= 6.8 else "HOLD"
+            return {
+                "action": action,
                 "final_score": round(technical_score, 1),
-                "suggested_capital_percent": self.risk_manager.get_conservative_position_size(technical_score, market_data.get("price_sol", 0), token_config),
-                "tp": 0.14,
-                "sl": -0.07,
+                "suggested_capital_percent": 0.12,
+                "tp": 0.15,
+                "sl": -0.085,
                 "bot_name": bot_name,
                 "reason": "Technical Rules Only"
             }
 
-        return decision
-
-    def _calculate_multi_tf_score(self, prices: List[float]) -> float:
-        weights = [0.40, 0.25, 0.18, 0.10, 0.05, 0.02]
-        tf_data = [
-            prices[-400:],
-            prices[-300::6] if len(prices) > 30 else prices[-100:],
-            prices[-240::12] if len(prices) > 60 else prices[-80:],
-            prices[-200::48] if len(prices) > 200 else prices[-60:],
-        ]
+    def _calculate_multi_tf_score(self, prices: List[float], weights_override: Dict = None) -> float:
+        default_weights = {"trend": 0.35, "momentum": 0.25, "mean_reversion": 0.20, "volatility": 0.20}
+        weights = weights_override or default_weights
 
         score = 0.0
-        for data, weight in zip(tf_data, weights):
-            score += self._analyze_single_tf(data) * weight
-        return score
+        for name, strat in self.strategies.items():
+            w = weights.get(name, 0.25)
+            score += strat.analyze(prices).get("score", 5.0) * w
+        return min(score, 9.9)
 
-    def _analyze_single_tf(self, prices: List[float]) -> float:
-        if len(prices) < 30:
-            return 5.0
-        total = 0.0
-        for strat in self.strategies.values():
-            total += strat.analyze(prices).get("score", 5.0)
-        return total / len(self.strategies)
+    def _generate_technical_summary(self, prices: List[float]) -> str:
+        """Rich technical summary for Claude"""
+        if len(prices) < 60:
+            return "Insufficient price history for analysis"
 
-    def _build_claude_context(self, token_config, market_data, prices, technical_score):
-        price = market_data.get("price_sol", 0)
-        trend = "Rising" if prices[-1] > prices[-30] else "Falling" if prices[-1] < prices[-30] else "Sideways"
-        return f"Token: {token_config.symbol}\nPrice: {price:.8f} SOL\nTechnical Score: {technical_score:.1f}\nTrend: {trend}\nMake a trading decision."
+        current = prices[-1]
+        change_5m = (current / prices[-30] - 1) * 100 if len(prices) > 30 else 0
+        change_15m = (current / prices[-90] - 1) * 100 if len(prices) > 90 else 0
+        change_30m = (current / prices[-180] - 1) * 100 if len(prices) > 180 else 0
+
+        volatility = (max(prices[-60:]) - min(prices[-60:])) / current * 100
+        momentum = (current - prices[-120]) / prices[-120] * 100 if len(prices) > 120 else 0
+
+        if change_30m > 12:
+            trend = "Strong Bullish Breakout"
+        elif change_30m > 5:
+            trend = "Bullish"
+        elif change_30m < -12:
+            trend = "Strong Bearish"
+        elif change_30m < -5:
+            trend = "Bearish"
+        else:
+            trend = "Sideways / Consolidation"
+
+        return (f"{trend} | 5m: {change_5m:+.1f}% | 15m: {change_15m:+.1f}% | 30m: {change_30m:+.1f}% | "
+                f"Volatility: {volatility:.1f}% | Momentum: {momentum:+.1f}%")
