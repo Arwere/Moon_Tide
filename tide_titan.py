@@ -50,29 +50,35 @@ class TideTitan:
             if time.time() < self.cooldown_until:
                 return
 
-            # === EXIT LOGIC (Now Powerful) ===
+            # Exit first
             exit_signal = self.portfolio.should_exit(self.token_key, current_price)
             if exit_signal["action"] == "SELL":
-                percent = exit_signal.get("percent", 1.0)
-                reason = exit_signal["reason"]
-                print(f"🛑 TIDE TITAN EXIT → {self.config.symbol} | {reason}")
-                await self._execute_exit(percent, current_price, reason)
-                self.cooldown_until = time.time() + 300  # Short cooldown after exit
+                await self._execute_exit(exit_signal.get("percent", 1.0), current_price, exit_signal["reason"])
+                self.cooldown_until = time.time() + 300
                 return
 
-            # === ENTRY LOGIC ===
+            # Smart Entry with Risk-Based Sizing
             if (action in ["BUY", "STRONG_BUY"] and score >= self.specialization["min_score"] and
                 not self.portfolio.get_position(self.token_key)):
                 
-                suggested_sol = min(decision.get("suggested_capital_percent", 0.15) * 8.0, 2.8)
-                if suggested_sol < 0.08:
+                suggested_percent = decision.get("suggested_capital_percent", 0.15)
+                sol_amount = self.portfolio.calculate_position_size(self.config, current_price, suggested_percent)
+
+                if sol_amount < 0.08:
                     return
 
-                token_amount = suggested_sol / current_price
-                if self.portfolio.open_position(self.token_key, self.config.symbol, current_price, suggested_sol, token_amount):
-                    await notifier.send_trade_alert("TideTitan", "BUY", self.config.symbol, score, suggested_sol, current_price, decision.get("reason", ""))
-                    await self.jupiter.execute_swap("So11111111111111111111111111111111111111112", self.config.address, suggested_sol, dry_run=self.dry_run)
-                    self.cooldown_until = time.time() + 1200  # 20 min cooldown after entry
+                token_amount = sol_amount / current_price
+
+                if self.portfolio.open_position(self.token_key, self.config.symbol, current_price, sol_amount, token_amount):
+                    await notifier.send_trade_alert(
+                        "TideTitan", "BUY", self.config.symbol, score, sol_amount, current_price, 
+                        decision.get("reason", "")
+                    )
+                    await self.jupiter.execute_swap(
+                        "So11111111111111111111111111111111111111112", 
+                        self.config.address, sol_amount, dry_run=self.dry_run
+                    )
+                    self.cooldown_until = time.time() + 1200
 
         except Exception as e:
             print(f"[TIDE TITAN - {self.config.symbol}] Error: {e}")
