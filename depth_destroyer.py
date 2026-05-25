@@ -30,8 +30,6 @@ class DepthDestroyer:
 
             prices = await get_historical_prices(self.config.address, limit=400)
             token_info = await fetcher.get_token_info(self.config.address)
-            
-            # Safe portfolio summary for Claude
             portfolio_summary = self._get_portfolio_summary()
 
             decision = await self.agent.get_risk_adjusted_decision(
@@ -39,8 +37,7 @@ class DepthDestroyer:
                 {
                     "price_sol": current_price,
                     "liquidity": token_info.get("liquidity_usd", 0),
-                    "volume_24h": token_info.get("volume_24h", 0),
-                    "mc": token_info.get("mc", 0)
+                    "volume_24h": token_info.get("volume_24h", 0)
                 },
                 prices,
                 bot_name="DepthDestroyer",
@@ -57,16 +54,21 @@ class DepthDestroyer:
             if time.time() < self.cooldown_until:
                 return
 
+            # === STRONG EXIT LOGIC ===
             exit_signal = self.portfolio.should_exit(self.token_key, current_price)
             if exit_signal["action"] == "SELL":
-                await self._execute_exit(exit_signal.get("percent", 1.0), current_price, exit_signal["reason"])
-                self.cooldown_until = time.time() + 300
+                percent = exit_signal.get("percent", 1.0)
+                reason = exit_signal["reason"]
+                print(f"🛑 DEPTH DESTROYER EXIT → {self.config.symbol} | {reason}")
+                await self._execute_exit(percent, current_price, reason)
+                self.cooldown_until = time.time() + 180   # Fast recovery for sniper bot
                 return
 
+            # === ENTRY LOGIC ===
             if (action in ["BUY", "STRONG_BUY"] and score >= self.specialization["min_score"] and
                 not self.portfolio.get_position(self.token_key)):
                 
-                suggested_sol = min(decision.get("suggested_capital_percent", 0.20) * 11.0, 4.0)
+                suggested_sol = min(decision.get("suggested_capital_percent", 0.20) * 10.0, 3.5)
                 if suggested_sol < 0.05:
                     return
 
@@ -80,22 +82,16 @@ class DepthDestroyer:
                         "So11111111111111111111111111111111111111112", 
                         self.config.address, suggested_sol, dry_run=self.dry_run
                     )
-                    self.cooldown_until = time.time() + 900
+                    self.cooldown_until = time.time() + 600
 
         except Exception as e:
             print(f"[DEPTH DESTROYER - {self.config.symbol}] Error: {e}")
 
     def _get_portfolio_summary(self):
-        """Safe fallback for portfolio data"""
         try:
             if hasattr(self.portfolio, 'get_summary_dict'):
                 return self.portfolio.get_summary_dict()
-            return {
-                "total_capital": getattr(self.portfolio, 'total_capital_sol', 50.0),
-                "deployed": 0.0,
-                "deployed_pct": 0.0,
-                "open_positions_summary": "None"
-            }
+            return {"total_capital": 50.0, "deployed": 0.0, "deployed_pct": 0.0, "open_positions_summary": "None"}
         except:
             return {"total_capital": 50.0, "deployed": 0.0, "deployed_pct": 0.0, "open_positions_summary": "None"}
 
