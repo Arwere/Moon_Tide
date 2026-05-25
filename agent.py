@@ -24,11 +24,8 @@ class Poseidon:
                     "reason": "Not enough price history"}
 
         specialization = specialization or {}
-        
-        # Calculate technical score
         technical_score = self._calculate_multi_tf_score(prices, specialization.get("strategy_weights"))
 
-        # Build rich context for Claude
         claude_context = {
             "bot_name": bot_name,
             "symbol": token_config.symbol,
@@ -46,7 +43,6 @@ class Poseidon:
 
         if self.use_claude:
             claude_result = await claude.get_decision(claude_context)
-            
             final_score = round((technical_score * 0.48) + (claude_result.get("final_score", 5.5) * 0.52), 1)
 
             return {
@@ -59,10 +55,8 @@ class Poseidon:
                 "reason": claude_result.get("reason", "Hybrid Analysis")
             }
         else:
-            # Pure technical fallback
-            action = "BUY" if technical_score >= 6.8 else "HOLD"
             return {
-                "action": action,
+                "action": "BUY" if technical_score >= 6.8 else "HOLD",
                 "final_score": round(technical_score, 1),
                 "suggested_capital_percent": 0.12,
                 "tp": 0.15,
@@ -74,7 +68,6 @@ class Poseidon:
     def _calculate_multi_tf_score(self, prices: List[float], weights_override: Dict = None) -> float:
         default_weights = {"trend": 0.35, "momentum": 0.25, "mean_reversion": 0.20, "volatility": 0.20}
         weights = weights_override or default_weights
-
         score = 0.0
         for name, strat in self.strategies.items():
             w = weights.get(name, 0.25)
@@ -82,28 +75,22 @@ class Poseidon:
         return min(score, 9.9)
 
     def _generate_technical_summary(self, prices: List[float]) -> str:
-        """Rich technical summary for Claude"""
         if len(prices) < 60:
-            return "Insufficient price history for analysis"
+            return "Insufficient price history"
 
         current = prices[-1]
         change_5m = (current / prices[-30] - 1) * 100 if len(prices) > 30 else 0
         change_15m = (current / prices[-90] - 1) * 100 if len(prices) > 90 else 0
         change_30m = (current / prices[-180] - 1) * 100 if len(prices) > 180 else 0
 
-        volatility = (max(prices[-60:]) - min(prices[-60:])) / current * 100
+        volatility = (max(prices[-60:]) - min(prices[-60:])) / current * 100 if current > 0 else 0
         momentum = (current - prices[-120]) / prices[-120] * 100 if len(prices) > 120 else 0
 
-        if change_30m > 12:
-            trend = "Strong Bullish Breakout"
-        elif change_30m > 5:
-            trend = "Bullish"
-        elif change_30m < -12:
-            trend = "Strong Bearish"
-        elif change_30m < -5:
-            trend = "Bearish"
-        else:
-            trend = "Sideways / Consolidation"
+        if change_30m > 12: trend = "Strong Bullish Breakout"
+        elif change_30m > 5: trend = "Bullish"
+        elif change_30m < -12: trend = "Strong Bearish"
+        elif change_30m < -5: trend = "Bearish"
+        else: trend = "Sideways"
 
         return (f"{trend} | 5m: {change_5m:+.1f}% | 15m: {change_15m:+.1f}% | 30m: {change_30m:+.1f}% | "
-                f"Volatility: {volatility:.1f}% | Momentum: {momentum:+.1f}%")
+                f"Vol: {volatility:.1f}% | Momentum: {momentum:+.1f}%")
