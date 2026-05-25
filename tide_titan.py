@@ -30,18 +30,11 @@ class TideTitan:
 
             prices = await get_historical_prices(self.config.address, limit=400)
             token_info = await fetcher.get_token_info(self.config.address)
-
-            # Safe portfolio summary
             portfolio_summary = self._get_portfolio_summary()
 
             decision = await self.agent.get_risk_adjusted_decision(
                 self.config,
-                {
-                    "price_sol": current_price,
-                    "liquidity": token_info.get("liquidity_usd", 0),
-                    "volume_24h": token_info.get("volume_24h", 0),
-                    "mc": token_info.get("mc", 0)
-                },
+                {"price_sol": current_price, "liquidity": token_info.get("liquidity_usd", 0)},
                 prices,
                 bot_name="TideTitan",
                 portfolio_summary=portfolio_summary,
@@ -57,23 +50,29 @@ class TideTitan:
             if time.time() < self.cooldown_until:
                 return
 
+            # === EXIT LOGIC (Now Powerful) ===
             exit_signal = self.portfolio.should_exit(self.token_key, current_price)
             if exit_signal["action"] == "SELL":
-                await self._execute_exit(exit_signal.get("percent", 1.0), current_price, exit_signal["reason"])
-                self.cooldown_until = time.time() + 600
+                percent = exit_signal.get("percent", 1.0)
+                reason = exit_signal["reason"]
+                print(f"🛑 TIDE TITAN EXIT → {self.config.symbol} | {reason}")
+                await self._execute_exit(percent, current_price, reason)
+                self.cooldown_until = time.time() + 300  # Short cooldown after exit
                 return
 
+            # === ENTRY LOGIC ===
             if (action in ["BUY", "STRONG_BUY"] and score >= self.specialization["min_score"] and
                 not self.portfolio.get_position(self.token_key)):
                 
-                suggested_sol = min(decision.get("suggested_capital_percent", 0.15) * 9.0, 3.0)
-                if suggested_sol < 0.08: return
+                suggested_sol = min(decision.get("suggested_capital_percent", 0.15) * 8.0, 2.8)
+                if suggested_sol < 0.08:
+                    return
 
                 token_amount = suggested_sol / current_price
                 if self.portfolio.open_position(self.token_key, self.config.symbol, current_price, suggested_sol, token_amount):
                     await notifier.send_trade_alert("TideTitan", "BUY", self.config.symbol, score, suggested_sol, current_price, decision.get("reason", ""))
                     await self.jupiter.execute_swap("So11111111111111111111111111111111111111112", self.config.address, suggested_sol, dry_run=self.dry_run)
-                    self.cooldown_until = time.time() + 1800
+                    self.cooldown_until = time.time() + 1200  # 20 min cooldown after entry
 
         except Exception as e:
             print(f"[TIDE TITAN - {self.config.symbol}] Error: {e}")
@@ -82,14 +81,9 @@ class TideTitan:
         try:
             if hasattr(self.portfolio, 'get_summary_dict'):
                 return self.portfolio.get_summary_dict()
-            return {
-                "total_capital": getattr(self.portfolio, 'total_capital_sol', 50),
-                "deployed": 0,
-                "deployed_pct": 0,
-                "open_positions_summary": "Unknown"
-            }
+            return {"total_capital": 50.0, "deployed": 0.0, "deployed_pct": 0.0, "open_positions_summary": "None"}
         except:
-            return {"total_capital": 50, "deployed": 0, "deployed_pct": 0, "open_positions_summary": "None"}
+            return {"total_capital": 50.0, "deployed": 0.0, "deployed_pct": 0.0, "open_positions_summary": "None"}
 
     async def _execute_exit(self, percent: float, current_price: float, reason: str):
         pos = self.portfolio.get_position(self.token_key)
