@@ -1,156 +1,92 @@
-import httpx
-import json
-import time
 import os
-import random
-from typing import Dict, Any
+import json
 import logging
+from datetime import datetime
+from typing import Dict
+from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 
 class ClaudeBrain:
     def __init__(self):
-        self.api_key = os.getenv("ANTHROPIC_API_KEY")
-        self.model = "claude-haiku-4-5"
-        self.client = httpx.AsyncClient(timeout=35.0)
-        self.memory_file = "claude_memory.json"
-        self.memory = self._load_memory()
+        self.client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.model = "claude-haiku-4-5"          # ← Haiku 4.5 (fast + cheap)
+        self.memory = []
 
-    def _load_memory(self):
-        if os.path.exists(self.memory_file):
-            try:
-                with open(self.memory_file, "r") as f:
-                    return json.load(f)
-            except:
-                return []
-        return []
-
-    def _save_memory(self):
+    async def get_decision(self, context: Dict) -> Dict:
         try:
-            with open(self.memory_file, "w") as f:
-                json.dump(self.memory[-60:], f, indent=2)
-        except:
-            pass
+            prompt = self._build_rich_prompt(context)
 
-    def add_to_memory(self, token: str, action: str, score: float, reason: str):
-        self.memory.append({
-            "time": time.strftime("%Y-%m-%d %H:%M"),
-            "token": token,
-            "action": action,
-            "score": score,
-            "reason": reason
-        })
-        self._save_memory()
-
-    async def get_decision(self, context: Dict[str, Any]) -> Dict:
-        if not self.api_key or "aaron-onboarding" in str(self.api_key):
-            return self._fallback_decision()
-
-        prompt = self._build_rich_prompt(context)
-
-        try:
-            response = await self.client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "max_tokens": 700,
-                    "temperature": 0.35,
-                    "messages": [{"role": "user", "content": prompt}]
-                }
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=500,
+                temperature=0.65,
+                messages=[{"role": "user", "content": prompt}]
             )
 
-            data = response.json()
-            text = data["content"][0]["text"]
+            text = response.content[0].text.strip()
 
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start == -1:
-                return self._fallback_decision()
+            # Extract JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "{" in text:
+                text = text[text.find("{"):text.rfind("}") + 1]
 
-            result = json.loads(text[start:end])
-
-            self.add_to_memory(
-                context.get("symbol", "Unknown"),
-                result.get("action", "HOLD"),
-                result.get("final_score", 5.5),
-                result.get("reason", "")
-            )
-
-            # Strong trade → Ask for improvement suggestion
-            if result.get("final_score", 0) >= 7.5 and random.random() < 0.35:
-                suggestion = await self._ask_for_improvement(context, result)
-                if suggestion:
-                    print(f"\n🤖 CLAUDE IMPROVEMENT SUGGESTION:\n{suggestion}\n")
-
-            return result
+            decision = json.loads(text)
+            self._update_memory(context, decision)
+            return decision
 
         except Exception as e:
-            logger.error(f"Claude Error: {e}")
-            return self._fallback_decision()
+            logger.error(f"Claude Haiku error: {e}")
+            return {
+                "action": "HOLD",
+                "final_score": 5.5,
+                "suggested_capital_percent": 0.0,
+                "recommended_bot": "TideTitan",
+                "reason": "Claude error - fallback HOLD"
+            }
 
     def _build_rich_prompt(self, ctx: Dict) -> str:
         memory_text = "\n".join([
             f"{m['time']} | {m['token']}: {m['action']} ({m['score']}) → {m['reason']}" 
-            for m in self.memory[-12:]
+            for m in self.memory[-8:]
         ]) or "No previous trades."
 
-        return f"""You are Poseidon, an elite Solana meme coin trading agent.
+        return f"""You are Poseidon, a fast and sharp Solana memecoin trading AI using Haiku 4.5.
 
-Bot: {ctx.get('bot_name')}
 Token: {ctx.get('symbol')} @ {ctx.get('price', 0):.8f} SOL
 Liquidity: ${ctx.get('liquidity', 0):,.0f} | 24h Vol: ${ctx.get('volume_24h', 0):,.0f}
-24h Change: {ctx.get('price_change_24h', 0):+.1f}%
+Technical: {ctx.get('technical_summary', 'N/A')}
 
-Portfolio: {ctx.get('total_capital', 50):.2f} SOL total | {ctx.get('deployed_pct', 0):.1f}% deployed
-Open Positions: {ctx.get('open_positions_summary', 'None')}
+Choose action + best bot for current conditions:
+- TideTitan → Strong trends & momentum
+- DepthDestroyer → High volatility & explosions
+- LiquidityKraken → Pullbacks & mean reversion
 
-Technical Analysis:
-{ctx.get('technical_summary', 'N/A')}
-
-Recent Memory:
-{memory_text}
-
-Make a high-conviction decision. Reply with **ONLY** valid JSON:
+Return **only** valid JSON:
 
 {{
-  "action": "STRONG_BUY | BUY | HOLD | SELL",
-  "final_score": 7.8,
-  "suggested_capital_percent": 0.18,
-  "tp": 0.16,
-  "sl": -0.085,
-  "reason": "Clear short reason (max 110 chars)"
+  "action": "BUY",
+  "final_score": 7.4,
+  "suggested_capital_percent": 0.15,
+  "tp": 0.18,
+  "sl": -0.09,
+  "recommended_bot": "TideTitan",
+  "reason": "Short clear reason"
 }}
 """
 
-    async def _ask_for_improvement(self, context: Dict, decision: Dict) -> str:
-        prompt = f"""You made a strong call (Score: {decision.get('final_score')}) on {context.get('symbol')}.
+    def _update_memory(self, context: Dict, decision: Dict):
+        self.memory.append({
+            "time": datetime.now().strftime("%H:%M"),
+            "token": context.get("symbol", "UNKNOWN"),
+            "action": decision.get("action"),
+            "score": decision.get("final_score"),
+            "reason": decision.get("reason", "")[:80]
+        })
+        if len(self.memory) > 12:
+            self.memory.pop(0)
 
-Give **one concrete, actionable** suggestion to improve the bot's strategy or code to capture more similar good trades.
-Be specific and technical. Max 2 sentences."""
 
-        try:
-            resp = await self.client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": self.model, "max_tokens": 300, "temperature": 0.5, "messages": [{"role": "user", "content": prompt}]}
-            )
-            return resp.json()["content"][0]["text"].strip()
-        except:
-            return "No suggestion available."
-
-    def _fallback_decision(self) -> Dict:
-        return {
-            "action": "HOLD",
-            "final_score": 5.5,
-            "suggested_capital_percent": 0.08,
-            "tp": 0.15,
-            "sl": -0.09,
-            "reason": "Claude unavailable - fallback"
-        }
-
+# Global instance
 claude = ClaudeBrain()
