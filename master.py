@@ -1,61 +1,75 @@
 import asyncio
 import time
 from datetime import datetime
+import logging
 
 from config import config
 from portfolio import Portfolio
-from jupiter_client import JupiterClient
 from wallet_manager import WalletManager
 
 from tide_titan import TideTitan
 from depth_destroyer import DepthDestroyer
 from liquidity_kraken import LiquidityKraken
 
+logger = logging.getLogger(__name__)
 
 class MoonTideMaster:
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
         self.wallet = WalletManager()
-        # Override for testing when wallet is empty
         self.portfolio = Portfolio(total_capital_sol=50.0, wallet_manager=self.wallet)
-        self.jupiter = JupiterClient()
         self.bots = {}
         self.running = False
         self._initialize_bots()
 
     def _initialize_bots(self):
-        bot_map = {"MM": TideTitan, "WHITEWHALE": DepthDestroyer, "TROLL": LiquidityKraken}
-        for token_key, token_config in config.TOKENS.items():
-            if not token_config.enabled:
+        """Correct initialization - matches bot constructors"""
+        print("🚀 Initializing specialized trading bots...")
+
+        for token_key, token_cfg in config.TOKENS.items():
+            if not getattr(token_cfg, 'enabled', True):
                 continue
-            print(f"🚀 Initializing bot for {token_config.symbol} ({token_key})")
-            bot_class = bot_map.get(token_key, TideTitan)
-            self.bots[token_key] = bot_class(token_key, self.portfolio, self.jupiter, self.dry_run)
+
+            print(f"   → {token_key} ({token_cfg.symbol})")
+
+            # Choose bot based on token
+            if token_key == "MM":
+                bot_class = TideTitan
+            elif token_key == "WHITEWHALE":
+                bot_class = DepthDestroyer
+            else:
+                bot_class = LiquidityKraken
+
+            self.bots[token_key] = bot_class(
+                token_key=token_key,
+                portfolio=self.portfolio,
+                dry_run=self.dry_run
+            )
+
+        print(f"✅ Loaded {len(self.bots)} bots | Monitoring {len(self.bots)} tokens")
 
     async def run(self):
         self.running = True
         await self.portfolio.refresh_capital()
 
-        print(f"🌊 Moon Tide Master started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Mode: {'🟢 LIVE' if not self.dry_run else '🔒 DRY-RUN'}")
-        print(f"Total Trading Capital: {self.portfolio.total_capital_sol:.4f} SOL")
-        print(f"Active tokens: {list(self.bots.keys())}")
-        print("=" * 90)
+        print(f"🌊 Moon Tide Master started - Dry Run: {self.dry_run}")
+        print(f"Active Tokens: {list(self.bots.keys())}")
+        print("=" * 80)
 
         cycle = 0
         while self.running:
             cycle += 1
             try:
-                tasks = [bot.tick() for bot in self.bots.values()]
+                tasks = [bot.tick(token_key) for token_key, bot in self.bots.items()]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
                 if cycle % 10 == 0:
                     print(self.portfolio.get_summary())
 
             except Exception as e:
-                print(f"Master error: {e}")
+                logger.error(f"Master cycle error: {e}")
 
-            await asyncio.sleep(7.0)
+            await asyncio.sleep(8.0)
 
     def stop(self):
         self.running = False
@@ -66,7 +80,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(master.run())
     except KeyboardInterrupt:
+        print("\n🛑 Stopping Moon Tide Master...")
         master.stop()
     except Exception as e:
-        print(f"Fatal error: {e}")
+        print(f"❌ Error: {e}")
         master.stop()
