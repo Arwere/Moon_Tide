@@ -2,7 +2,6 @@ from typing import Dict, List
 import logging
 from config import config
 from strategies import TrendStrategy, MomentumStrategy, MeanReversionStrategy, VolatilityStrategy
-from risk_manager import RiskManager
 from claude_brain import claude
 
 logger = logging.getLogger(__name__)
@@ -15,18 +14,23 @@ class Poseidon:
             "mean_reversion": MeanReversionStrategy(),
             "volatility": VolatilityStrategy()
         }
-        self.risk_manager = RiskManager()
         self.use_claude = True
 
     async def get_risk_adjusted_decision(self, token_config, market_data: Dict, prices: List[float], 
                                        bot_name: str, portfolio_summary: Dict = None) -> Dict:
         
         if len(prices) < 80:
-            return {"action": "HOLD", "final_score": 5.0, "suggested_capital_percent": 0.0, 
-                    "recommended_bot": "TideTitan", "reason": "Not enough history"}
+            return {
+                "action": "HOLD", 
+                "final_score": 5.0, 
+                "suggested_capital_percent": 0.0,
+                "recommended_bot": "TideTitan",
+                "reason": "Not enough price history"
+            }
 
         technical_score = self._calculate_multi_tf_score(prices)
 
+        # Build context for Claude
         claude_context = {
             "bot_name": bot_name,
             "symbol": token_config.symbol,
@@ -56,19 +60,14 @@ class Poseidon:
                     "reason": claude_result.get("reason", "Hybrid Analysis")
                 }
 
-                # Risk layer
-                risk_check = self.risk_manager.get_trade_recommendation(decision, market_data.get("price_sol", 0), token_config)
-                if risk_check.get("action") == "BLOCK":
-                    decision["action"] = "HOLD"
-                    decision["reason"] += " | Risk Blocked"
-
                 return decision
 
             except Exception as e:
                 logger.error(f"Claude failed: {e}")
                 return self._technical_fallback(technical_score, bot_name)
 
-        return self._technical_fallback(technical_score, bot_name)
+        else:
+            return self._technical_fallback(technical_score, bot_name)
 
     def _calculate_multi_tf_score(self, prices: List[float]) -> float:
         default_weights = {"trend": 0.35, "momentum": 0.25, "mean_reversion": 0.20, "volatility": 0.20}
@@ -78,8 +77,8 @@ class Poseidon:
                 result = strat.analyze(prices)
                 w = default_weights.get(name, 0.25)
                 score += result.get("score", 5.0) * w
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Strategy {name} failed: {e}")
         return min(max(round(score, 1), 1.0), 9.9)
 
     def _generate_technical_summary(self, prices: List[float]) -> str:
@@ -105,5 +104,5 @@ class Poseidon:
             "tp": 0.15,
             "sl": -0.085,
             "recommended_bot": "TideTitan",
-            "reason": "Technical Rules Only"
+            "reason": "Technical Rules Only (Claude fallback)"
         }
