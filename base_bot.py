@@ -1,159 +1,137 @@
 import time
 import logging
-from typing import Dict, Optional
+from typing import Dict
 from data_fetcher import get_price_in_sol, get_token_info, get_historical_prices
 from agent import Poseidon
 from portfolio import Portfolio
-from jupiter_client import jupiter
+from jupiter_client import JupiterClient
 from telegram_notifier import notifier
+from config import config
 
 logger = logging.getLogger(__name__)
 
 class TradingBot:
-    """
-    Base class for all specialized trading bots.
-    Eliminates ~80% duplication across TideTitan, DepthDestroyer, and LiquidityKraken.
-    """
-    
-    def __init__(self, 
-                 token_key: str, 
-                 portfolio: Portfolio, 
-                 specialization: Dict,
-                 dry_run: bool = True):
-        
-        self.token_key = token_key
-        self.config = config.TOKENS[token_key]  # from your config.py
+    def __init__(self, name: str, portfolio: Portfolio, specialization: Dict = None, dry_run: bool = True):
+        self.name = name
         self.portfolio = portfolio
-        self.jupiter = jupiter
+        self.jupiter = JupiterClient()          # ← Correct: Create instance here
         self.agent = Poseidon()
         self.dry_run = dry_run
-        self.specialization = specialization
+        self.specialization = specialization or {"min_score": 6.5}
         self.cooldown_until = 0
-        self.last_tick = 0
-        self.name = self.__class__.__name__
 
-    async def tick(self):
-        """Main trading loop - shared logic for all bots"""
+    async def tick(self, token_key: str):
         if time.time() < self.cooldown_until:
             return
 
         try:
-            current_price = await get_price_in_sol(self.config.address)
+            token_config = config.TOKENS[token_key]
+            current_price = await get_price_in_sol(token_config.address)
             if current_price is None or current_price <= 0:
-                logger.warning(f"[{self.name}] Invalid price for {self.config.symbol}")
                 return
 
-            # Get market data
-            market_data = await get_token_info(self.config.address)
+            market_data = await get_token_info(token_config.address)
             market_data["price_sol"] = current_price
+            prices = await get_historical_prices(token_config.address, limit=400)
 
-            # Get historical prices for TA
-            prices = await get_historical_prices(self.config.address, limit=400)
-
-            # Portfolio summary
             portfolio_summary = self.portfolio.get_summary_dict()
 
-            # Get decision from Poseidon
             decision = await self.agent.get_risk_adjusted_decision(
-                token_config=self.config,
+                token_config=token_config,
                 market_data=market_data,
                 prices=prices,
                 bot_name=self.name,
-                portfolio_summary=portfolio_summary,
-                specialization=self.specialization
+                portfolio_summary=portfolio_summary
             )
 
             action = decision.get("action", "HOLD")
             score = decision.get("final_score", 5.0)
+            recommended_bot = decision.get("recommended_bot", "TideTitan")
 
-            # === ENTRY LOGIC ===
+            # Log Claude's decision to dedicated topic
+            await notifier.send_claude_decision(self.name, token_config.symbol, decision)
+
+            if recommended_bot != self.name:
+                return
+
             if action in ["BUY", "STRONG_BUY"] and score >= self.specialization.get("min_score", 6.5):
-                if not self.portfolio.get_position(self.token_key):
-                    await self._execute_entry(decision, current_price)
+                if not self.portfolio.get_position(token_key):
+                    await self._execute_entry(token_key, decision, current_price)
 
-            # === EXIT LOGIC ===
-            elif action in ["SELL", "STRONG_SELL"] or self.portfolio.should_exit(self.token_key, current_price):
-                pos = self.portfolio.get_position(self.token_key)
+            exit_signal = self.portfolio.should_exit(token_key, current_price)
+            if action in ["SELL", "STRONG_SELL"] or exit_signal.get("action") == "SELL":
+                pos = self.portfolio.get_position(token_key)
                 if pos:
-                    await self._execute_exit(1.0, current_price, decision.get("reason", "Signal"))
-
-            self.last_tick = time.time()
+                    await self._execute_exit(token_key, 1.0, current_price, decision.get("reason", "Signal"))
 
         except Exception as e:
-            logger.error(f"[{self.name}] Tick error: {e}", exc_info=True)
+            logger.error(f"[{self.name}] Error on {token_key}: {e}", exc_info=False)
 
-    async def _execute_entry(self, decision: Dict, current_price: float):
-        """Execute buy"""
+    async def _execute_entry(self, token_key: str, decision: Dict, current_price: float):
+        token_config = config.TOKENS[token_key]
+        
         sol_amount = self.portfolio.calculate_position_size(
-            self.token_key, 
+            token_config, 
+            current_price,
             decision.get("suggested_capital_percent", 0.12)
         )
 
-        if sol_amount < 0.05:  # minimum size
+        if sol_amount < 0.05:
             return
+
+        logger.info(f"[{self.name}] 🟢 OPENING {token_config.symbol} | {sol_amount:.4f} SOL")
 
         try:
             await notifier.send_trade_alert(
-                bot_name=self.name,
-                action="BUY",
-                symbol=self.config.symbol,
-                score=decision.get("final_score"),
-                sol_amount=sol_amount,
-                price=current_price,
-                reason=decision.get("reason", "")
+                bot_name=self.name, action="BUY", symbol=token_config.symbol,
+                score=decision.get("final_score", 0), sol_amount=sol_amount,
+                price=current_price, reason=decision.get("reason", "")
             )
 
             if not self.dry_run:
                 await self.jupiter.execute_swap(
-                    input_mint="So11111111111111111111111111111111111111112",  # SOL
-                    output_mint=self.config.address,
+                    input_mint="So11111111111111111111111111111111111111112",
+                    output_mint=token_config.address,
                     amount=sol_amount,
                     dry_run=False
                 )
 
+            token_amount = sol_amount / current_price if current_price > 0 else 0
             self.portfolio.open_position(
-                token_key=self.token_key,
+                token_key=token_key,
+                symbol=token_config.symbol,
                 entry_price=current_price,
                 sol_amount=sol_amount,
-                reason=decision.get("reason", "")
+                token_amount=token_amount
             )
-
-            self.cooldown_until = time.time() + 180  # 3 min cooldown after entry
+            self.cooldown_until = time.time() + 180
 
         except Exception as e:
             logger.error(f"[{self.name}] Entry failed: {e}")
 
-    async def _execute_exit(self, percent: float, current_price: float, reason: str):
-        """Execute sell"""
-        pos = self.portfolio.get_position(self.token_key)
-        if not pos:
-            return
+    async def _execute_exit(self, token_key: str, percent: float, current_price: float, reason: str):
+        pos = self.portfolio.get_position(token_key)
+        if not pos: return
+        token_config = config.TOKENS[token_key]
+
+        logger.info(f"[{self.name}] 🔴 CLOSING {token_config.symbol} | {reason}")
 
         try:
             await notifier.send_trade_alert(
-                bot_name=self.name,
-                action="SELL",
-                symbol=self.config.symbol,
-                score=0.0,
-                sol_amount=0.0,
-                price=current_price,
-                reason=reason
+                bot_name=self.name, action="SELL", symbol=token_config.symbol,
+                score=0.0, sol_amount=0.0, price=current_price, reason=reason
             )
 
             if not self.dry_run:
-                # Approximate SOL received (real would be from Jupiter response)
-                sell_sol_approx = (pos.amount * percent) * current_price * 0.98  # 2% slippage buffer
                 await self.jupiter.execute_swap(
-                    input_mint=self.config.address,
-                    output_mint="So11111111111111111111111111111111111111112",  # SOL
+                    input_mint=token_config.address,
+                    output_mint="So11111111111111111111111111111111111111112",
                     amount=pos.amount * percent,
                     dry_run=False
                 )
 
-            self.portfolio.close_partial(self.token_key, percent, current_price, reason)
-
+            self.portfolio.close_partial(token_key, percent, current_price, reason)
             if percent >= 0.95:
-                self.cooldown_until = time.time() + 300  # 5 min cooldown after full exit
-
+                self.cooldown_until = time.time() + 300
         except Exception as e:
             logger.error(f"[{self.name}] Exit failed: {e}")
