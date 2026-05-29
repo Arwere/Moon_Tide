@@ -1,51 +1,69 @@
+import os
 import json
-import base58
-from solders.keypair import Keypair
-from solders.pubkey import Pubkey
-import asyncio
+import logging
 import httpx
+from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 class WalletManager:
     def __init__(self):
-        self.keypair = None
-        self.pubkey = None
-        self._load_wallet()
+        self.rpc_url = os.getenv("HELIUS_RPC_URL") or os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
+        self.client = httpx.AsyncClient(timeout=15.0)
+        
+        self.private_key = self._load_private_key()
+        
+        if self.private_key:
+            logger.info("✅ Private key loaded from wallet.json")
+        else:
+            logger.error("❌ Failed to load private key from wallet.json")
 
-    def _load_wallet(self):
+    def _load_private_key(self) -> Optional[str]:
+        """Load from wallet.json (single source of truth)"""
         try:
-            with open("wallet.json", "r") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    self.keypair = Keypair.from_bytes(bytes(data))
-                else:
-                    self.keypair = Keypair.from_base58_string(data["private_key"])
-                self.pubkey = self.keypair.pubkey()
-                print("✅ Wallet loaded (private key only)")
+            if os.path.exists("wallet.json"):
+                with open("wallet.json", "r") as f:
+                    data = json.load(f)
+                    pk = data.get("private_key")
+                    if pk and len(pk) > 10:   # basic validation
+                        return pk.strip()
         except Exception as e:
-            print(f"❌ Wallet load failed: {e}")
+            logger.error(f"Error reading wallet.json: {e}")
+        
+        return None
 
     async def get_balance(self) -> float:
-        """Get SOL balance in SOL (not lamports)"""
-        if not self.pubkey:
-            return 50.0  # fallback
+        if not self.private_key:
+            logger.warning("No private key available - using 0 SOL")
+            return 0.0
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    "https://api.mainnet-beta.solana.com",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "getBalance",
-                        "params": [str(self.pubkey)]
-                    }
-                )
-                data = resp.json()
-                lamports = data.get("result", {}).get("value", 0)
-                return round(lamports / 1_000_000_000, 4)  # Convert to SOL
-        except Exception as e:
-            print(f"Balance fetch failed: {e}")
-            return 50.0  # safe fallback for dry-run
+            pubkey = os.getenv("WALLET_PUBLIC_KEY")
+            if not pubkey:
+                logger.warning("WALLET_PUBLIC_KEY not set in .env")
+                return 0.0
 
-    def get_pubkey(self):
-        return str(self.pubkey) if self.pubkey else None
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBalance",
+                "params": [pubkey]
+            }
+
+            resp = await self.client.post(self.rpc_url, json=payload, timeout=10.0)
+            data = resp.json()
+
+            if "result" in data and "value" in data["result"]:
+                lamports = data["result"]["value"]
+                return round(lamports / 1_000_000_000, 6)
+        except Exception as e:
+            logger.error(f"Balance fetch failed: {e}")
+
+        return 0.0
+
+    async def close(self):
+        await self.client.aclose()
+
+
+# Global instance
+wallet_manager = WalletManager()
