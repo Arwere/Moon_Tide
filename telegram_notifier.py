@@ -1,7 +1,7 @@
 import os
 import logging
 import requests
-from typing import Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -15,16 +15,10 @@ class TelegramNotifier:
 
         self.enabled = bool(self.token and self.chat_id)
 
-        if self.enabled:
-            logger.info(f"✅ Telegram enabled (Bots topic: {self.bots_topic})")
-        else:
-            logger.debug("Telegram notifications disabled")
-
     async def send_trade_alert(self, bot_name: str, action: str, symbol: str, 
                               score: float, sol_amount: float, price: float, reason: str):
-        """Send trade execution alerts"""
         if not self.enabled:
-            logger.info(f"[{bot_name}] {action} {symbol} | Score: {score:.1f} | {reason}")
+            logger.info(f"[{bot_name}] {action} {symbol} | Score: {score:.1f}")
             return
 
         message = f"""
@@ -36,43 +30,43 @@ Amount: `{sol_amount:.4f}` SOL
 Reason: {reason}
         """.strip()
 
+        await self._send_message(message, self.bots_topic)
+
+    async def send_claude_decision(self, bot_name: str, symbol: str, decision: Dict):
+        """Poseidon Decision with nice Telegram quote block"""
+        if not self.enabled:
+            return
+
+        action = decision.get("action", "HOLD")
+        score = decision.get("final_score", 5.0)
+        recommended = decision.get("recommended_bot", "TideTitan")
+        reason = decision.get("reason", "No reason provided")
+
+        message = f"""
+🧠 **Poseidon Decision** — {bot_name}
+**Token:** `{symbol}`
+**Action:** `{action}`
+**Score:** `{score:.1f}`
+**Recommended Bot:** `{recommended}`
+
+**Reasoning:**
+> {reason}
+        """.strip()
+
+        await self._send_message(message, self.claude_topic)
+
+    async def _send_message(self, text: str, thread_id: int):
         try:
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             payload = {
                 "chat_id": self.chat_id,
-                "text": message,
+                "text": text,
                 "parse_mode": "Markdown",
-                "message_thread_id": self.bots_topic
+                "message_thread_id": thread_id
             }
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
-
-    async def send_claude_decision(self, bot_name: str, symbol: str, decision: dict):
-        """Send Claude decisions to dedicated topic"""
-        if not self.enabled:
-            return
-
-        message = f"""
-🧠 **Claude Decision** — {bot_name}
-**Token:** `{symbol}`
-**Action:** `{decision.get('action', 'HOLD')}`
-**Score:** `{decision.get('final_score', 5.0):.1f}`
-**Bot:** `{decision.get('recommended_bot', 'TideTitan')}`
-**Reason:** {decision.get('reason', 'No reason')}
-        """.strip()
-
-        try:
-            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": message,
-                "parse_mode": "Markdown",
-                "message_thread_id": self.claude_topic
-            }
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"Claude decision send failed: {e}")
 
 
 # Global instance
