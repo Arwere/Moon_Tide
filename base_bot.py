@@ -14,11 +14,12 @@ class TradingBot:
     def __init__(self, name: str, portfolio: Portfolio, specialization: Dict = None, dry_run: bool = True):
         self.name = name
         self.portfolio = portfolio
-        self.jupiter = JupiterClient()          # ← Correct: Create instance here
+        self.jupiter = JupiterClient()
         self.agent = Poseidon()
         self.dry_run = dry_run
         self.specialization = specialization or {"min_score": 6.5}
         self.cooldown_until = 0
+        self.last_log = 0
 
     async def tick(self, token_key: str):
         if time.time() < self.cooldown_until:
@@ -48,16 +49,22 @@ class TradingBot:
             score = decision.get("final_score", 5.0)
             recommended_bot = decision.get("recommended_bot", "TideTitan")
 
-            # Log Claude's decision to dedicated topic
-            await notifier.send_claude_decision(self.name, token_config.symbol, decision)
+            # === Only log/send high-conviction decisions ===
+            now = time.time()
+            if score >= 6.5 or action in ["BUY", "STRONG_BUY", "SELL", "STRONG_SELL"]:
+                if now - self.last_log > 15:   # Max 1 log every 15 seconds
+                    await notifier.send_claude_decision(self.name, token_config.symbol, decision)
+                    self.last_log = now
 
             if recommended_bot != self.name:
                 return
 
+            # ENTRY
             if action in ["BUY", "STRONG_BUY"] and score >= self.specialization.get("min_score", 6.5):
                 if not self.portfolio.get_position(token_key):
                     await self._execute_entry(token_key, decision, current_price)
 
+            # EXIT
             exit_signal = self.portfolio.should_exit(token_key, current_price)
             if action in ["SELL", "STRONG_SELL"] or exit_signal.get("action") == "SELL":
                 pos = self.portfolio.get_position(token_key)
