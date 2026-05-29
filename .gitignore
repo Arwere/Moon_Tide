@@ -1,0 +1,30 @@
+# Environment variables
+.env
+
+# Private keys & sensitive data
+wallet.json
+claude_memory.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files
+*.csv
+*.log
+historical_data.csv
+
+# Virtual environment
+venv/
+env/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
