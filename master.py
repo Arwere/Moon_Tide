@@ -23,7 +23,6 @@ class MoonTideMaster:
         self._initialize_bots()
 
     def _initialize_bots(self):
-        """Correct initialization - matches bot constructors"""
         print("🚀 Initializing specialized trading bots...")
 
         for token_key, token_cfg in config.TOKENS.items():
@@ -32,7 +31,6 @@ class MoonTideMaster:
 
             print(f"   → {token_key} ({token_cfg.symbol})")
 
-            # Choose bot based on token
             if token_key == "MM":
                 bot_class = TideTitan
             elif token_key == "WHITEWHALE":
@@ -76,7 +74,7 @@ class MoonTideMaster:
 
 
 if __name__ == "__main__":
-    master = MoonTideMaster(dry_run=True)
+    master = MoonTideMaster(dry_run=True)   # Change to False for live
     try:
         asyncio.run(master.run())
     except KeyboardInterrupt:
