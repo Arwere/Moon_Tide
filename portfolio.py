@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Optional
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ class Portfolio:
         self.wallet_manager = wallet_manager
         self.positions: Dict[str, Position] = {}
         self.realized_pnl = 0.0
+        self.daily_summary = {"date": str(date.today()), "trades": 0, "pnl": 0.0}
 
     async def refresh_capital(self):
         if self.wallet_manager:
@@ -28,9 +29,8 @@ class Portfolio:
                 balance = await self.wallet_manager.get_balance()
                 if balance > 0:
                     self.total_capital_sol = balance
-                    logger.info(f"💰 Portfolio capital updated: {balance:.4f} SOL")
-            except Exception as e:
-                logger.warning(f"Wallet refresh failed: {e}")
+            except:
+                pass
 
     def get_position(self, token_key: str) -> Optional[Position]:
         return self.positions.get(token_key)
@@ -48,13 +48,15 @@ class Portfolio:
 
     def close_partial(self, token_key: str, percent: float, current_price: float, reason: str):
         pos = self.get_position(token_key)
-        if not pos:
-            return
+        if not pos: return
+
         sold_tokens = pos.amount * percent
         entry_cost = sold_tokens * pos.entry_price
         exit_value = sold_tokens * current_price
         pnl = exit_value - entry_cost
+
         self.realized_pnl += pnl
+        self.daily_summary["pnl"] += pnl
 
         if percent >= 0.95:
             del self.positions[token_key]
@@ -82,7 +84,7 @@ class Portfolio:
     def get_deployed_value(self) -> float:
         return sum(p.sol_amount for p in self.positions.values())
 
-    def get_summary_dict(self) -> Dict:                     # ← Added this method
+    def get_summary_dict(self) -> Dict:
         deployed = self.get_deployed_value()
         deployed_pct = (deployed / self.total_capital_sol * 100) if self.total_capital_sol > 0 else 0
         return {
@@ -93,10 +95,14 @@ class Portfolio:
             "open_positions": len(self.positions)
         }
 
-    def get_summary(self) -> str:
+    def get_summary(self) -> str:   # ← This was missing
         s = self.get_summary_dict()
-        return f"🌊 Portfolio | Capital: {s['total_capital']:.4f} | Deployed: {s['deployed']:.4f} ({s['deployed_pct']:.1f}%) | PnL: {s['realized_pnl']:+.4f}"
+        return (f"🌊 Moon Tide Portfolio | Capital: {s['total_capital']:.4f} SOL | "
+                f"Deployed: {s['deployed']:.4f} SOL ({s['deployed_pct']:.1f}%) | "
+                f"Realized PnL: {s['realized_pnl']:+.4f} SOL")
 
+    def get_daily_summary(self) -> Dict:
+        return self.daily_summary
 
-# Global instance (optional)
-portfolio = Portfolio()
+    def reset_daily_summary(self):
+        self.daily_summary = {"date": str(date.today()), "trades": 0, "pnl": 0.0}
