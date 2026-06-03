@@ -10,7 +10,7 @@ markdown
 
 ### Step 1: Install Dependencies
 ```bash
-pip install -r requirements.txt```
+```pip install -r requirements.txt```
 
 
 Step 2: Setup Environment VariablesCreate a file named .env in the root folder and add your keys.Step 3: Configure TokensOpen config.py and add your token contract addresses.Step 4: Run the Botbash
