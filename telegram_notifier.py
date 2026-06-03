@@ -15,45 +15,42 @@ class TelegramNotifier:
 
         self.enabled = bool(self.token and self.chat_id)
 
-    async def send_trade_alert(self, bot_name: str, action: str, symbol: str, 
-                              score: float, sol_amount: float, price: float, reason: str):
-        if not self.enabled:
-            logger.info(f"[{bot_name}] {action} {symbol} | Score: {score:.1f}")
-            return
-
-        message = f"""
-🪐 **{bot_name}**
-**{action}** `{symbol}`
-Price: `{price:.8f}` SOL
-Score: `{score:.1f}`
-Amount: `{sol_amount:.4f}` SOL
-Reason: {reason}
-        """.strip()
-
-        await self._send_message(message, self.bots_topic)
+        if self.enabled:
+            logger.info("✅ Telegram notifications enabled")
 
     async def send_claude_decision(self, bot_name: str, symbol: str, decision: Dict):
-        """Poseidon Decision with nice Telegram quote block"""
         if not self.enabled:
             return
 
         action = decision.get("action", "HOLD")
         score = decision.get("final_score", 5.0)
         recommended = decision.get("recommended_bot", "TideTitan")
-        reason = decision.get("reason", "No reason provided")
+        reason = decision.get("reason", "No clear reasoning")
 
-        message = f"""
-🧠 **Poseidon Decision** — {bot_name}
-**Token:** `{symbol}`
-**Action:** `{action}`
-**Score:** `{score:.1f}`
-**Recommended Bot:** `{recommended}`
+        message = f"""*🧠 Poseidon Analysis — {bot_name}*
 
-**Reasoning:**
-> {reason}
-        """.strip()
+*Token:* `{symbol}`
+*Action:* `{action}`
+*Score:* `{score:.1f}`
+*Recommended Bot:* `{recommended}`
+
+*Reasoning:* ```{reason}```"""
 
         await self._send_message(message, self.claude_topic)
+
+    async def send_trade_alert(self, bot_name: str, action: str, symbol: str, 
+                              score: float, sol_amount: float, price: float, reason: str):
+        if not self.enabled:
+            return
+
+        message = f"""*{bot_name}*
+*{action}* `{symbol}`
+Price: `{price:.8f}` SOL
+Score: `{score:.1f}`
+Amount: `{sol_amount:.4f}` SOL
+Reason: {reason}"""
+
+        await self._send_message(message, self.bots_topic)
 
     async def _send_message(self, text: str, thread_id: int):
         try:
