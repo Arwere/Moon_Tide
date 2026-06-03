@@ -6,6 +6,7 @@ import logging
 from config import config
 from portfolio import Portfolio
 from wallet_manager import WalletManager
+from daily_summary import DailySummary
 
 from tide_titan import TideTitan
 from depth_destroyer import DepthDestroyer
@@ -20,6 +21,7 @@ class MoonTideMaster:
         self.portfolio = Portfolio(total_capital_sol=50.0, wallet_manager=self.wallet)
         self.bots = {}
         self.running = False
+        self.daily_summary = DailySummary(self.portfolio)
         self._initialize_bots()
 
     def _initialize_bots(self):
@@ -54,6 +56,9 @@ class MoonTideMaster:
         print(f"Active Tokens: {list(self.bots.keys())}")
         print("=" * 80)
 
+        # Start daily performance summary task
+        asyncio.create_task(self.daily_summary.start_daily_task())
+
         cycle = 0
         while self.running:
             cycle += 1
@@ -61,7 +66,7 @@ class MoonTideMaster:
                 tasks = [bot.tick(token_key) for token_key, bot in self.bots.items()]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-                if cycle % 10 == 0:
+                if cycle % 15 == 0:   # Print summary less frequently
                     print(self.portfolio.get_summary())
 
             except Exception as e:
@@ -74,7 +79,8 @@ class MoonTideMaster:
 
 
 if __name__ == "__main__":
-    master = MoonTideMaster(dry_run=True)   # Change to False for live
+    master = MoonTideMaster(dry_run=True)   # Change to False for live trading
+    
     try:
         asyncio.run(master.run())
     except KeyboardInterrupt:
