@@ -1,83 +1,45 @@
 import numpy as np
-import pandas as pd
 from typing import List, Dict
 
-def get_indicators_on_tf(prices: List[float]):
-    if len(prices) < 50:
-        return {"rsi": 50, "price_vs_sma20": 0, "macd_hist": 0, "volatility": 10.0, "sma50": prices[-1] if prices else 0}
+def calculate_multi_timeframe_indicators(prices: List[float]) -> Dict:
+    if len(prices) < 50 or prices[-1] <= 0:
+        return {"overall_trend": "neutral", "strength": 0.0, "summary": "Insufficient data"}
 
-    prices = np.array(prices)
-    delta = np.diff(prices)
-    gain = np.maximum(delta, 0)
-    loss = np.abs(np.minimum(delta, 0))
-    
-    avg_gain = pd.Series(gain).rolling(14).mean().iloc[-1]
-    avg_loss = pd.Series(loss).rolling(14).mean().iloc[-1]
-    rs = avg_gain / avg_loss if avg_loss > 0 else 100
-    rsi = 100 - (100 / (1 + rs))
+    prices = np.array(prices, dtype=float)
 
-    sma20 = np.mean(prices[-20:])
-    sma50 = np.mean(prices[-50:]) if len(prices) >= 50 else sma20
-    price_vs_sma20 = (prices[-1] - sma20) / sma20 * 100
+    def analyze_tf(data, name):
+        if len(data) < 20:
+            return {"trend": "neutral", "momentum": 0.0, "volatility": 15.0}
 
-    ema12 = pd.Series(prices).ewm(span=12, adjust=False).mean().iloc[-1]
-    ema26 = pd.Series(prices).ewm(span=26, adjust=False).mean().iloc[-1]
-    macd = ema12 - ema26
-    signal = pd.Series(prices).ewm(span=9, adjust=False).mean().iloc[-1]
-    macd_hist = macd - signal
+        sma20 = np.mean(data[-20:])
+        sma50 = np.mean(data[-50:]) if len(data) >= 50 else sma20
 
-    volatility = np.std(prices[-20:]) / np.mean(prices[-20:]) * 100 if len(prices) > 20 else 10.0
+        momentum = (data[-1] / data[-10] - 1) * 100 if len(data) >= 10 else 0.0
+        volatility = (np.std(data[-20:]) / np.mean(data[-20:]) * 100) if np.mean(data[-20:]) > 0 else 20.0
+
+        trend = "bullish" if data[-1] > sma20 > sma50 else "bearish" if data[-1] < sma20 < sma50 else "neutral"
+
+        return {
+            "trend": trend,
+            "momentum": round(momentum, 2),
+            "volatility": round(volatility, 2)
+        }
+
+    # Different timeframes (assuming ~5min candles)
+    tf5m  = analyze_tf(prices[-100:], "5m")
+    tf15m = analyze_tf(prices[-300:], "15m")
+    tf1h  = analyze_tf(prices[-600:], "1h")
+    tf4h  = analyze_tf(prices[-1000:], "4h") if len(prices) >= 1000 else tf1h
+
+    # Overall assessment
+    bullish_count = sum(1 for tf in [tf5m, tf15m, tf1h, tf4h] if tf["trend"] == "bullish")
+    overall_trend = "strong_bullish" if bullish_count >= 3 else "bullish" if bullish_count >= 2 else "neutral"
 
     return {
-        "rsi": rsi,
-        "price_vs_sma20": price_vs_sma20,
-        "macd_hist": macd_hist,
-        "volatility": volatility,
-        "sma50": sma50
+        "overall_trend": overall_trend,
+        "tf5m": tf5m,
+        "tf15m": tf15m,
+        "tf1h": tf1h,
+        "tf4h": tf4h,
+        "summary": f"{overall_trend.upper()} | 5m:{tf5m['trend']} | 1h:{tf1h['trend']} | 4h:{tf4h['trend']}"
     }
-
-
-class MeanReversionStrategy:
-    def analyze(self, prices: List[float], market_data=None, token_config=None):
-        ind = get_indicators_on_tf(prices)
-        score = 5.0
-        if ind["price_vs_sma20"] < -5.0 and ind["rsi"] < 38:
-            score += 4.5
-        elif ind["price_vs_sma20"] < -3.0 and ind["rsi"] < 44:
-            score += 3.0
-        if ind["macd_hist"] > 0:
-            score += 1.4
-        return {"score": min(score, 9.9), "reason": "Mean Reversion"}
-
-
-class TrendStrategy:
-    def analyze(self, prices: List[float], market_data=None, token_config=None):
-        ind = get_indicators_on_tf(prices)
-        score = 5.0
-        if ind["price_vs_sma20"] > 2.0 and ind["rsi"] > 52:
-            score += 3.2
-        return {"score": score, "reason": "Trend"}
-
-
-class MomentumStrategy:
-    def analyze(self, prices: List[float], market_data=None, token_config=None):
-        ind = get_indicators_on_tf(prices)
-        score = 5.0
-        if ind["rsi"] > 60:
-            score += 3.3
-        return {"score": score, "reason": "Momentum"}
-
-
-class VolatilityStrategy:
-    def analyze(self, prices: List[float], market_data=None, token_config=None):
-        ind = get_indicators_on_tf(prices)
-        score = 5.0
-        if ind["volatility"] > 7.5:
-            score += 2.6
-        return {"score": score, "reason": "Volatility"}
-
-
-def get_all_strategy_results(prices: List[float], market_data=None, token_config=None):
-    strategies = [MeanReversionStrategy(), TrendStrategy(), MomentumStrategy(), VolatilityStrategy()]
-    total = sum(s.analyze(prices).get("score", 5.0) for s in strategies)
-    return {"final_score": round(total / 4, 1)}
