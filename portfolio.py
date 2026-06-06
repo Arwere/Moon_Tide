@@ -1,7 +1,8 @@
 import logging
+import time
 from typing import Dict, Optional
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -12,58 +13,48 @@ class Position:
     entry_price: float
     amount: float
     sol_amount: float
-    status: str = "OPEN"
-    entry_time: str = None
+    entry_time: str
 
 class Portfolio:
-    def __init__(self, total_capital_sol: float = 50.0, wallet_manager=None):
+    def __init__(self, total_capital_sol: float = 50.0):
         self.total_capital_sol = total_capital_sol
-        self.wallet_manager = wallet_manager
         self.positions: Dict[str, Position] = {}
         self.realized_pnl = 0.0
-        self.daily_summary = {"date": str(date.today()), "trades": 0, "pnl": 0.0}
 
-    async def refresh_capital(self):
-        if self.wallet_manager:
-            try:
-                balance = await self.wallet_manager.get_balance()
-                if balance > 0:
-                    self.total_capital_sol = balance
-            except:
-                pass
+    def can_open_new_position(self, token_key: str, liquidity_usd: float, fdv: float) -> bool:
+        if token_key in self.positions:
+            logger.info(f"Already holding {token_key} — skipping")
+            return False
+
+        if len(self.positions) >= 3:
+            logger.info("🚫 Max 3 positions reached")
+            return False
+
+        # Liquidity check as % of FDV (lowered for meme coins)
+        if fdv > 0:
+            liq_ratio = (liquidity_usd / fdv) * 100
+            if liq_ratio < 7.0:   # Lowered from 20 → allows current tokens
+                logger.warning(f"💰 Liquidity low ({liq_ratio:.1f}% of FDV) for {token_key} — blocked")
+                return False
+
+        return True
+
+    def calculate_position_size(self, suggested_percent: float = 0.20) -> float:
+        available = self.total_capital_sol - self.get_deployed_value()
+        size = min(available * suggested_percent, 4.0)
+        return max(0.25, size)
+
+    def get_deployed_value(self) -> float:
+        return sum(p.sol_amount for p in self.positions.values())
+
+    def open_position(self, token_key: str, symbol: str, entry_price: float, sol_amount: float, token_amount: float):
+        self.positions[token_key] = Position(token_key, symbol, entry_price, token_amount, sol_amount, datetime.now().strftime("%H:%M"))
+        logger.info(f"📍 OPENED {symbol} | {sol_amount:.3f} SOL")
 
     def get_position(self, token_key: str) -> Optional[Position]:
         return self.positions.get(token_key)
 
-    def open_position(self, token_key: str, symbol: str, entry_price: float, 
-                     sol_amount: float, token_amount: float):
-        self.positions[token_key] = Position(
-            token_key=token_key,
-            symbol=symbol,
-            entry_price=entry_price,
-            amount=token_amount,
-            sol_amount=sol_amount,
-            entry_time=datetime.now().strftime("%H:%M")
-        )
-
-    def close_partial(self, token_key: str, percent: float, current_price: float, reason: str):
-        pos = self.get_position(token_key)
-        if not pos: return
-
-        sold_tokens = pos.amount * percent
-        entry_cost = sold_tokens * pos.entry_price
-        exit_value = sold_tokens * current_price
-        pnl = exit_value - entry_cost
-
-        self.realized_pnl += pnl
-        self.daily_summary["pnl"] += pnl
-
-        if percent >= 0.95:
-            del self.positions[token_key]
-        else:
-            pos.amount -= sold_tokens
-
-    def should_exit(self, token_key: str, current_price: float) -> Dict:
+    def should_exit(self, token_key: str, current_price: float, hours_held: float = 0) -> Dict:
         pos = self.get_position(token_key)
         if not pos:
             return {"action": "HOLD", "reason": "No position", "percent": 0.0}
@@ -71,38 +62,20 @@ class Portfolio:
         pnl_pct = ((current_price / pos.entry_price) - 1) * 100
 
         if pnl_pct <= -20.0:
-            return {"action": "SELL", "reason": f"Stop Loss hit", "percent": 1.0}
-        elif pnl_pct >= 50.0:
-            return {"action": "SELL", "reason": f"Take Profit hit", "percent": 1.0}
+            return {"action": "SELL", "reason": "Stop Loss -20%", "percent": 1.0}
+        if pnl_pct >= 50.0:
+            return {"action": "SELL", "reason": "Take Profit +50%", "percent": 1.0}
+        if pnl_pct >= 30.0:
+            return {"action": "SELL", "reason": "Partial TP", "percent": 0.6}
+        if hours_held > 8 and abs(pnl_pct) < 10:
+            return {"action": "SELL", "reason": "Time-based exit", "percent": 1.0}
 
         return {"action": "HOLD", "reason": f"PnL: {pnl_pct:+.1f}%", "percent": 0.0}
 
-    def calculate_position_size(self, token_config, current_price: float, suggested_percent: float) -> float:
-        available = self.total_capital_sol - self.get_deployed_value()
-        return min(available * suggested_percent, self.total_capital_sol * 0.25, 2.0)
-
-    def get_deployed_value(self) -> float:
-        return sum(p.sol_amount for p in self.positions.values())
-
     def get_summary_dict(self) -> Dict:
-        deployed = self.get_deployed_value()
-        deployed_pct = (deployed / self.total_capital_sol * 100) if self.total_capital_sol > 0 else 0
         return {
-            "total_capital": self.total_capital_sol,
-            "deployed": deployed,
-            "deployed_pct": deployed_pct,
-            "realized_pnl": self.realized_pnl,
-            "open_positions": len(self.positions)
+            "total_capital": round(self.total_capital_sol, 4),
+            "deployed": round(self.get_deployed_value(), 4),
+            "open_positions": len(self.positions),
+            "positions": list(self.positions.keys())
         }
-
-    def get_summary(self) -> str:   # ← This was missing
-        s = self.get_summary_dict()
-        return (f"🌊 Moon Tide Portfolio | Capital: {s['total_capital']:.4f} SOL | "
-                f"Deployed: {s['deployed']:.4f} SOL ({s['deployed_pct']:.1f}%) | "
-                f"Realized PnL: {s['realized_pnl']:+.4f} SOL")
-
-    def get_daily_summary(self) -> Dict:
-        return self.daily_summary
-
-    def reset_daily_summary(self):
-        self.daily_summary = {"date": str(date.today()), "trades": 0, "pnl": 0.0}
