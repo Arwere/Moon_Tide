@@ -1,91 +1,51 @@
 import asyncio
-import time
-from datetime import datetime
 import logging
-
-from config import config
+from datetime import datetime
 from portfolio import Portfolio
-from wallet_manager import WalletManager
-from daily_summary import DailySummary
-
 from tide_titan import TideTitan
 from depth_destroyer import DepthDestroyer
 from liquidity_kraken import LiquidityKraken
+from telegram_notifier import notifier
+from config import config
+
+# ==================== CLEAN LOGGING SETUP ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
+)
+
+# Suppress noisy HTTP libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+# ============================================================
 
-class MoonTideMaster:
-    def __init__(self, dry_run: bool = True):
-        self.dry_run = dry_run
-        self.wallet = WalletManager()
-        self.portfolio = Portfolio(total_capital_sol=50.0, wallet_manager=self.wallet)
-        self.bots = {}
-        self.running = False
-        self.daily_summary = DailySummary(self.portfolio)
-        self._initialize_bots()
+async def main():
+    logger.info("🚀 Initializing specialized trading bots...")
 
-    def _initialize_bots(self):
-        print("🚀 Initializing specialized trading bots...")
+    portfolio = Portfolio(total_capital_sol=50.0)
 
-        for token_key, token_cfg in config.TOKENS.items():
-            if not getattr(token_cfg, 'enabled', True):
-                continue
+    bots = [
+        TideTitan(portfolio, dry_run=True),
+        DepthDestroyer(portfolio, dry_run=True),
+        LiquidityKraken(portfolio, dry_run=True)
+    ]
 
-            print(f"   → {token_key} ({token_cfg.symbol})")
+    logger.info(f"✅ Loaded {len(bots)} bots | Monitoring {len(config.get_enabled_tokens())} tokens")
+    logger.info(f"Active Tokens: {config.get_enabled_tokens()}")
+    logger.info("🌊 Moon Tide Master started - Dry Run: True")
 
-            if token_key == "MM":
-                bot_class = TideTitan
-            elif token_key == "WHITEWHALE":
-                bot_class = DepthDestroyer
-            else:
-                bot_class = LiquidityKraken
-
-            self.bots[token_key] = bot_class(
-                token_key=token_key,
-                portfolio=self.portfolio,
-                dry_run=self.dry_run
-            )
-
-        print(f"✅ Loaded {len(self.bots)} bots | Monitoring {len(self.bots)} tokens")
-
-    async def run(self):
-        self.running = True
-        await self.portfolio.refresh_capital()
-
-        print(f"🌊 Moon Tide Master started - Dry Run: {self.dry_run}")
-        print(f"Active Tokens: {list(self.bots.keys())}")
-        print("=" * 80)
-
-        # Start daily performance summary task
-        asyncio.create_task(self.daily_summary.start_daily_task())
-
-        cycle = 0
-        while self.running:
-            cycle += 1
-            try:
-                tasks = [bot.tick(token_key) for token_key, bot in self.bots.items()]
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-                if cycle % 15 == 0:   # Print summary less frequently
-                    print(self.portfolio.get_summary())
-
-            except Exception as e:
-                logger.error(f"Master cycle error: {e}")
-
-            await asyncio.sleep(8.0)
-
-    def stop(self):
-        self.running = False
-
+    try:
+        while True:
+            tasks = [bot.tick(token_key) for bot in bots for token_key in bot.tokens]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(8)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("🛑 Shutting down gracefully...")
+    finally:
+        logger.info("🌊 Moon Tide stopped.")
 
 if __name__ == "__main__":
-    master = MoonTideMaster(dry_run=True)   # Change to False for live trading
-    
-    try:
-        asyncio.run(master.run())
-    except KeyboardInterrupt:
-        print("\n🛑 Stopping Moon Tide Master...")
-        master.stop()
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        master.stop()
+    asyncio.run(main())
