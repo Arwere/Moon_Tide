@@ -1,15 +1,12 @@
 from base_bot import TradingBot
+from config import config
 
 class LiquidityKraken(TradingBot):
-    """Mean Reversion + Volatility Specialist"""
-    def __init__(self, token_key: str, portfolio, dry_run: bool = True):
-        specialization = {
-            "strategy_weights": {"mean_reversion": 0.40, "volatility": 0.30, "momentum": 0.20, "trend": 0.10},
-            "min_score": 6.3
-        }
+    def __init__(self, portfolio, dry_run=True):
         super().__init__(
             name="LiquidityKraken",
             portfolio=portfolio,
-            specialization=specialization,
+            specialization={"min_score": 6.5},
             dry_run=dry_run
         )
+        self.tokens = config.get_enabled_tokens()
