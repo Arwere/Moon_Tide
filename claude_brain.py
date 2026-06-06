@@ -9,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 class ClaudeBrain:
     def __init__(self):
-        self.client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key or not api_key.startswith("sk-ant-"):
+            logger.error("❌ ANTHROPIC_API_KEY is missing or invalid!")
+            logger.error("Run: export ANTHROPIC_API_KEY=sk-ant-...")
+        
+        self.client = AsyncAnthropic(api_key=api_key)
         self.model = "claude-haiku-4-5-20251001"
         self.memory_file = "claude_memory.json"
         self.memory = self._load_memory()
@@ -19,8 +24,8 @@ class ClaudeBrain:
             try:
                 with open(self.memory_file, "r") as f:
                     return json.load(f)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not load memory: {e}")
         return []
 
     def _save_memory(self):
@@ -33,70 +38,75 @@ class ClaudeBrain:
     async def get_decision(self, context: Dict) -> Dict:
         try:
             prompt = self._build_rich_prompt(context)
-
             response = await self.client.messages.create(
                 model=self.model,
-                max_tokens=600,
+                max_tokens=700,
                 temperature=0.7,
                 messages=[{"role": "user", "content": prompt}]
             )
 
             text = response.content[0].text.strip()
+
+            # Robust JSON extraction
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0].strip()
-            elif "{" in text:
-                text = text[text.find("{"):text.rfind("}")+1]
+            elif "```" in text:
+                text = text.split("```")[1].strip()
 
-            decision = json.loads(text)
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start >= 0 and end > start:
+                json_str = text[start:end]
+                decision = json.loads(json_str)
+            else:
+                raise ValueError("No JSON found")
+
             self._update_memory(context, decision)
             return decision
 
         except Exception as e:
             logger.error(f"Claude decision error: {e}")
-            return {
-                "action": "HOLD",
-                "final_score": 5.5,
-                "suggested_capital_percent": 0.0,
-                "recommended_bot": "TideTitan",
-                "reason": "Claude unavailable - fallback HOLD"
-            }
+            return self._fallback_decision()
+
+    def _fallback_decision(self) -> Dict:
+        return {
+            "action": "HOLD",
+            "final_score": 5.0,
+            "suggested_capital_percent": 0.0,
+            "recommended_bot": "TideTitan",
+            "reason": "Claude unavailable - safe HOLD"
+        }
 
     def _build_rich_prompt(self, ctx: Dict) -> str:
         memory_text = "\n".join([
             f"{m['time']} | {m['token']}: {m['action']} ({m['score']}) → {m['reason']}" 
-            for m in self.memory[-12:]
+            for m in self.memory[-15:]
         ]) or "No previous trades."
 
-        return f"""You are Poseidon, elite Solana memecoin trader.
+        return f"""You are Poseidon, aggressive but disciplined Solana memecoin trader.
 
-Token: {ctx.get('symbol')} @ {ctx.get('price', 0):.10f} SOL
-Liquidity: ${ctx.get('liquidity', 0):,.0f} | Ratio: {ctx.get('liquidity_ratio', 0):.1f}% of FDV
-24h Vol: ${ctx.get('volume_24h', 0):,.0f} | Est FDV: ~${ctx.get('fdv', 'Unknown')}
+CURRENT TOKEN:
+{ctx.get('symbol')} @ {ctx.get('price', 0):.10f} SOL
+Liquidity: ${ctx.get('liquidity', 0):,.0f} | FDV Ratio: {ctx.get('liquidity_ratio', 0):.1f}%
+24h Volume: ${ctx.get('volume_24h', 0):,.0f}
 
-{ctx.get('technical_summary', 'No technical data')}
+TECHNICAL SUMMARY: {ctx.get('technical_summary', 'No technical data available')}
 
-Recent Memory:
+PORTFOLIO: {ctx.get('portfolio_summary', 'No open positions')}
+
+RECENT MEMORY:
 {memory_text}
 
-**Realistic Liquidity Rules for Solana Memecoins (2026):**
-- Micro-caps (< $5M FDV): **3.0%+** liquidity ratio is acceptable with strong momentum
-- 4-8%+ is good, 8%+ is excellent
-- Absolute liquidity < $40k is still risky, but >$80k with good ratio is tradable
-
-**Priorities:**
-- Multi-timeframe alignment (especially 1h + 4h)
-- Strong momentum + volume
-- Relative liquidity over absolute dollars
+Be decisive. Good momentum or liquidity setups should get BUY (score >= 6.5).
+Only HOLD/PASS on truly weak setups.
 
 Return **only** valid JSON:
 {{
-  "action": "BUY",
-  "final_score": 7.8,
-  "suggested_capital_percent": 0.18,
-  "tp": 0.25,
-  "sl": -0.12,
+  "action": "BUY" | "SELL" | "HOLD",
+  "final_score": 7.2,
+  "suggested_capital_percent": 0.22,
   "recommended_bot": "TideTitan",
-  "reason": "Strong multi-timeframe setup with acceptable relative liquidity"
+  "reason": "Strong momentum across timeframes"
 }}
 """
 
@@ -106,9 +116,9 @@ Return **only** valid JSON:
             "token": context.get("symbol", "UNKNOWN"),
             "action": decision.get("action"),
             "score": decision.get("final_score"),
-            "reason": decision.get("reason", "")[:120]
+            "reason": decision.get("reason", "")[:150]
         })
-        if len(self.memory) > 30:
+        if len(self.memory) > 35:
             self.memory.pop(0)
         self._save_memory()
 
